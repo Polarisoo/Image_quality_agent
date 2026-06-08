@@ -3,6 +3,7 @@ from pathlib import Path
 from task3_agent import (
     DEFAULT_LIBRARY_ROOT,
     auto_detect_colorchecker_rois,
+    auto_detect_distortion_grid,
     auto_detect_sfr_rectangle_edges,
     auto_detect_step_chart_rois,
     load_image,
@@ -39,6 +40,19 @@ def main() -> None:
     color_rois, color_meta = auto_detect_colorchecker_rois(color_image)
     assert len(color_rois) == 24, f"expected 24 color ROIs, got {len(color_rois)}"
     print("[OK] ColorChecker:", color_meta.get("method"))
+
+    distortion_image = load_image(SAMPLES / "distortion_DIS180R1.jpg")
+    distortion_rois, distortion_meta = auto_detect_distortion_grid(distortion_image)
+    assert len(distortion_rois) == 1, "expected one distortion grid ROI"
+    assert distortion_meta.get("vertical_line_count", 0) >= 5
+    assert distortion_meta.get("horizontal_line_count", 0) >= 5
+    print(
+        "[OK] distortion grid:",
+        distortion_meta.get("method"),
+        "V/H=",
+        distortion_meta.get("vertical_line_count"),
+        distortion_meta.get("horizontal_line_count"),
+    )
 
     print("\nSmoke test passed. You can run start_web.bat now.")
 

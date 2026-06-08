@@ -325,10 +325,10 @@ function workflowDetail(item) {
   return item.stage;
 }
 
-const editableTools = new Set(["sfr", "color_check", "step_chart"]);
+const editableTools = new Set(["sfr", "color_check", "step_chart", "distortion"]);
 
 function expectedManualCount(tool) {
-  return { color_check: 24, step_chart: 20 }[tool] || null;
+  return { color_check: 24, step_chart: 20, distortion: 1 }[tool] || null;
 }
 
 function activeManualRoiCount() {
@@ -580,6 +580,7 @@ function manualGuideHtml(tool) {
   if (tool === "sfr") return sfrManualGuide();
   if (tool === "color_check") return colorManualGuide();
   if (tool === "step_chart") return grayManualGuide();
+  if (tool === "distortion") return distortionManualGuide();
   return {
     title: "人工 ROI 框选说明",
     html: "<p>当前工具暂时没有专门的人工框选说明。</p>",
@@ -671,6 +672,32 @@ function grayManualGuide() {
   };
 }
 
+function distortionManualGuide() {
+  return {
+    title: "畸变测量应该怎么手动画框",
+    html: `
+      <div class="guide-grid">
+        <div>
+          <p class="guide-lead">畸变测量只需要 1 个 ROI：请框住完整的规则网格区域。</p>
+          <ol>
+            <li>框选网格纸/网格测试卡主体，尽量包含从左到右、从上到下的多条横纵网格线。</li>
+            <li>不要只框单独一条线或很小一块网格；畸变算法需要多条线来判断弯曲程度。</li>
+            <li>绿色框可以略微超过网格边缘，但不要包含外侧黑白斜纹、箭头、墙面或桌面。</li>
+            <li>如果网格有透视倾斜，先尽量框整个网格，程序会用横纵线的弯曲量给出参考畸变率。</li>
+          </ol>
+        </div>
+        <div class="guide-figure">
+          ${distortionGuideSvg()}
+          <p>绿色框是 ROI；青色和紫色线表示程序追踪到的竖直/水平网格线。</p>
+        </div>
+      </div>
+      <div class="guide-warning">
+        自动识别失败常见原因：网格占画面太小、网格线太浅或模糊、外侧斜纹比网格更显著、画面反光，或者网格被裁切得不完整。
+      </div>
+    `,
+  };
+}
+
 function sfrGuideSvg() {
   return `
     <svg class="guide-svg" viewBox="0 0 220 160" aria-label="MTF框选示意图">
@@ -684,6 +711,24 @@ function sfrGuideSvg() {
       <text x="145" y="78" fill="#0b6b4f" font-size="12" font-weight="700">水平MTF</text>
       <text x="130" y="94" fill="#0b6b4f" font-size="11">框竖直边</text>
       <text x="58" y="24" fill="#0b6b4f" font-size="12" font-weight="700">竖直MTF：框水平边</text>
+    </svg>
+  `;
+}
+
+function distortionGuideSvg() {
+  const verticals = [45, 75, 105, 135, 165, 195];
+  const horizontals = [36, 62, 88, 114, 140];
+  return `
+    <svg class="guide-svg" viewBox="0 0 250 175" aria-label="畸变网格框选示意图">
+      <rect width="250" height="175" rx="12" fill="#f6f4ee"/>
+      <rect x="28" y="24" width="194" height="130" fill="#f7fbff" stroke="#13d44b" stroke-width="4"/>
+      ${verticals.map((x) =>
+        `<path d="M${x},28 C${x - 8},70 ${x + 8},105 ${x},150" fill="none" stroke="#18bfc0" stroke-width="2"/>`
+      ).join("")}
+      ${horizontals.map((y) =>
+        `<path d="M32,${y} C85,${y - 8} 165,${y + 8} 218,${y}" fill="none" stroke="#bd4bff" stroke-width="2"/>`
+      ).join("")}
+      <text x="34" y="168" fill="#0b6b4f" font-size="12" font-weight="700">框完整网格，避开外侧斜纹</text>
     </svg>
   `;
 }
@@ -813,6 +858,17 @@ function singleResultHtml(tool, result) {
     return metricGrid([
       ["可分辨相邻过渡", `${result.detected_transitions} / 19`],
       ["归一化对比度", formatNumber(result.contrast_normalized, 4)],
+    ]) + `<div class="assessment">${escapeHtml(result.assessment)}</div>`;
+  }
+  if (tool === "distortion") {
+    const grid = result.opencv_grid_measurement || {};
+    return metricGrid([
+      ["畸变类型", result.distortion_type || "未判断"],
+      ["k1", formatNumber(result.k1, 6)],
+      ["SMIA TV(%)", formatNumber(result.smia_tv_percent, 3)],
+      ["|SMIA TV|(%)", formatNumber(result.absolute_smia_tv_percent, 3)],
+      ["竖直/水平网格线", `${grid.vertical_line_count || 0} / ${grid.horizontal_line_count || 0}`],
+      ["最大线弯曲(%)", formatNumber(grid.max_line_bow_percent, 3)],
     ]) + `<div class="assessment">${escapeHtml(result.assessment)}</div>`;
   }
   return `<pre>${escapeHtml(JSON.stringify(result, null, 2))}</pre>`;

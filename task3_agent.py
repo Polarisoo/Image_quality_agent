@@ -2832,6 +2832,375 @@ def auto_detect_step_chart_rois(
     )
 
 
+def _distortion_profile_peaks(gray: np.ndarray, axis: str) -> list[int]:
+    from scipy.signal import find_peaks
+
+    height, width = gray.shape
+    if axis == "x":
+        center = height // 2
+        band = gray[max(0, center - 5) : min(height, center + 6), :]
+        profile = 255.0 - np.median(band, axis=0)
+        length = width
+    else:
+        center = width // 2
+        band = gray[:, max(0, center - 5) : min(width, center + 6)]
+        profile = 255.0 - np.median(band, axis=1)
+        length = height
+    window = max(5, int(round(length / 900)) * 2 + 1)
+    profile = np.convolve(profile, np.ones(window) / window, mode="same")
+    peaks, properties = find_peaks(
+        profile,
+        distance=max(12, length // 90),
+        prominence=max(12.0, float(np.std(profile)) * 0.18),
+        height=max(25.0, float(np.percentile(profile, 55))),
+    )
+    if not len(peaks):
+        return []
+    heights = properties.get("peak_heights", np.zeros_like(peaks, dtype=float))
+    ranked = sorted(
+        (int(peak), float(height_value))
+        for peak, height_value in zip(peaks, heights)
+    )
+    return [peak for peak, _height in ranked]
+
+
+def _select_distortion_grid_sequence(
+    peaks: list[int],
+    length: int,
+    min_count: int,
+) -> list[int]:
+    if len(peaks) < min_count:
+        return []
+    edge_margin = max(3, int(round(length * 0.025)))
+    peaks = sorted(
+        int(value)
+        for value in peaks
+        if edge_margin <= int(value) <= length - edge_margin
+    )
+    if len(peaks) < min_count:
+        return []
+    diffs = np.diff(peaks)
+    useful_diffs = [
+        float(value)
+        for value in diffs
+        if length / 120.0 <= value <= length / 4.0
+    ]
+    if not useful_diffs:
+        return []
+    median_gap = float(np.median(useful_diffs))
+    min_gap = max(length / 160.0, median_gap * 0.42)
+    max_gap = median_gap * 1.9
+    groups: list[list[int]] = []
+    current = [peaks[0]]
+    for previous, value in zip(peaks, peaks[1:]):
+        gap = value - previous
+        if min_gap <= gap <= max_gap:
+            current.append(value)
+        else:
+            if len(current) >= min_count:
+                groups.append(current)
+            current = [value]
+    if len(current) >= min_count:
+        groups.append(current)
+    if not groups:
+        return []
+    center = length / 2.0
+
+    def score(group: list[int]) -> tuple[float, float, float]:
+        group_diffs = np.diff(group)
+        regularity = float(np.std(group_diffs) / (np.mean(group_diffs) + 1e-6))
+        centered = abs((group[0] + group[-1]) / 2.0 - center) / length
+        coverage = (group[-1] - group[0]) / length
+        return (len(group) + coverage, -regularity, -centered)
+
+    return max(groups, key=score)
+
+
+def _trace_distortion_lines(
+    gray: np.ndarray,
+    x_peaks: list[int],
+    y_peaks: list[int],
+) -> tuple[list[list[list[int]]], list[list[list[int]]]]:
+    height, width = gray.shape
+    x_gap = float(np.median(np.diff(x_peaks))) if len(x_peaks) > 1 else width / 20.0
+    y_gap = float(np.median(np.diff(y_peaks))) if len(y_peaks) > 1 else height / 14.0
+    x_search = max(10, int(round(x_gap * 0.36)))
+    y_search = max(10, int(round(y_gap * 0.36)))
+    y_start = y_peaks[1] if len(y_peaks) > 4 else min(y_peaks)
+    y_end = y_peaks[-2] if len(y_peaks) > 4 else max(y_peaks)
+    x_start = x_peaks[1] if len(x_peaks) > 4 else min(x_peaks)
+    x_end = x_peaks[-2] if len(x_peaks) > 4 else max(x_peaks)
+    y_samples = np.linspace(
+        max(0, y_start),
+        min(height - 1, y_end),
+        max(24, min(70, len(y_peaks) * 4)),
+    ).astype(int)
+    x_samples = np.linspace(
+        max(0, x_start),
+        min(width - 1, x_end),
+        max(24, min(90, len(x_peaks) * 4)),
+    ).astype(int)
+
+    def smooth(values: np.ndarray) -> np.ndarray:
+        if len(values) < 5:
+            return values
+        return np.convolve(values, np.ones(5) / 5, mode="same")
+
+    vertical_peak_list = x_peaks[1:-1] if len(x_peaks) > 10 else x_peaks
+    horizontal_peak_list = y_peaks[1:-1] if len(y_peaks) > 8 else y_peaks
+
+    vertical_lines: list[list[list[int]]] = []
+    for x0 in vertical_peak_list:
+        points: list[list[int]] = []
+        last = float(x0)
+        for y in y_samples:
+            band = gray[max(0, y - 2) : min(height, y + 3), :]
+            profile = 255.0 - np.median(band, axis=0)
+            left = max(0, int(round(last)) - x_search)
+            right = min(width, int(round(last)) + x_search + 1)
+            if right <= left + 3:
+                continue
+            local = smooth(profile[left:right])
+            offset = int(np.argmax(local))
+            found = left + offset
+            if float(local[offset]) < max(18.0, float(np.percentile(profile, 45))):
+                continue
+            points.append([int(found), int(y)])
+            last = 0.78 * last + 0.22 * found
+        if len(points) >= max(12, int(len(y_samples) * 0.58)):
+            vertical_lines.append(points)
+
+    horizontal_lines: list[list[list[int]]] = []
+    for y0 in horizontal_peak_list:
+        points = []
+        last = float(y0)
+        for x in x_samples:
+            band = gray[:, max(0, x - 2) : min(width, x + 3)]
+            profile = 255.0 - np.median(band, axis=1)
+            top = max(0, int(round(last)) - y_search)
+            bottom = min(height, int(round(last)) + y_search + 1)
+            if bottom <= top + 3:
+                continue
+            local = smooth(profile[top:bottom])
+            offset = int(np.argmax(local))
+            found = top + offset
+            if float(local[offset]) < max(18.0, float(np.percentile(profile, 45))):
+                continue
+            points.append([int(x), int(found)])
+            last = 0.78 * last + 0.22 * found
+        if len(points) >= max(12, int(len(x_samples) * 0.58)):
+            horizontal_lines.append(points)
+    return vertical_lines, horizontal_lines
+
+
+def _line_perpendicular_residual(points: np.ndarray) -> np.ndarray:
+    centered = points - np.mean(points, axis=0)
+    if len(centered) < 2:
+        return np.zeros(len(centered))
+    _u, _s, vh = np.linalg.svd(centered, full_matrices=False)
+    direction = vh[0]
+    normal = np.array([-direction[1], direction[0]], dtype=float)
+    return centered @ normal
+
+
+def _distortion_straightness_error(
+    k1: float,
+    lines: list[list[list[int]]],
+    width: int,
+    height: int,
+) -> float:
+    center_x = width / 2.0
+    center_y = height / 2.0
+    diagonal_sq = float(width * width + height * height)
+    total = 0.0
+    count = 0
+    for line in lines:
+        points = np.asarray(line, dtype=float)
+        if len(points) < 4:
+            continue
+        x = points[:, 0] - center_x
+        y = points[:, 1] - center_y
+        scale = 1.0 + 4.0 * k1 * (x * x + y * y) / diagonal_sq
+        corrected = np.column_stack([x * scale, y * scale])
+        residual = _line_perpendicular_residual(corrected)
+        total += float(np.sum(residual * residual))
+        count += len(points)
+    if count == 0:
+        return float("inf")
+    return total / count
+
+
+def _smia_tv_from_k1(k1: float) -> float:
+    if abs(k1) < 1e-12:
+        return 0.0
+
+    def positive_root(rhs: float) -> float | None:
+        roots = np.roots([float(k1), 0.0, 1.0, -float(rhs)])
+        candidates = [
+            float(np.real(root))
+            for root in roots
+            if abs(np.imag(root)) < 1e-6 and float(np.real(root)) > 0
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda value: abs(k1 * value ** 3 + value - rhs))
+
+    y1_root = positive_root(1.0)
+    y2 = positive_root(0.5 ** 0.5)
+    if y1_root is None or y2 is None or abs(y2) < 1e-12:
+        return 0.0
+    y1 = y1_root * (0.5 ** 0.5)
+    return float((y1 - y2) / y2)
+
+
+def _distortion_kind_from_k1(k1: float) -> str:
+    if abs(k1) < 1e-5:
+        return "未检出明显畸变"
+    return "枕形畸变" if k1 > 0 else "桶形畸变"
+
+
+def analyze_distortion_grid(image: np.ndarray) -> dict[str, Any]:
+    from scipy.optimize import minimize_scalar
+
+    gray = _gray_u8(image)
+    height, width = gray.shape
+    x_peaks = _select_distortion_grid_sequence(
+        _distortion_profile_peaks(gray, "x"),
+        width,
+        min_count=7,
+    )
+    y_peaks = _select_distortion_grid_sequence(
+        _distortion_profile_peaks(gray, "y"),
+        height,
+        min_count=6,
+    )
+    if len(x_peaks) < 7 or len(y_peaks) < 6:
+        raise WorkflowError("未能从畸变图中稳定识别横纵网格线，请手动框选完整网格区域。")
+    vertical_lines, horizontal_lines = _trace_distortion_lines(gray, x_peaks, y_peaks)
+    if len(vertical_lines) < 5 or len(horizontal_lines) < 5:
+        raise WorkflowError("检测到的网格线数量不足，无法可靠估计畸变。")
+    all_lines = vertical_lines + horizontal_lines
+    before_error = _distortion_straightness_error(0.0, all_lines, width, height)
+    fit = minimize_scalar(
+        lambda value: _distortion_straightness_error(value, all_lines, width, height),
+        bounds=(-0.8, 0.8),
+        method="bounded",
+        options={"xatol": 1e-5},
+    )
+    k1 = float(fit.x)
+    after_error = _distortion_straightness_error(k1, all_lines, width, height)
+    bows = []
+    for line in all_lines:
+        points = np.asarray(line, dtype=float)
+        if len(points) < 4:
+            continue
+        bows.extend(np.abs(_line_perpendicular_residual(points)).tolist())
+    max_bow = float(max(bows)) if bows else 0.0
+    rms_bow = float(math.sqrt(float(np.mean(np.asarray(bows) ** 2)))) if bows else 0.0
+    tv = _smia_tv_from_k1(k1)
+    return {
+        "method": "opencv_grid_profile_line_fit",
+        "x_peaks": [int(value) for value in x_peaks],
+        "y_peaks": [int(value) for value in y_peaks],
+        "vertical_line_count": int(len(vertical_lines)),
+        "horizontal_line_count": int(len(horizontal_lines)),
+        "vertical_lines": vertical_lines,
+        "horizontal_lines": horizontal_lines,
+        "k1_opencv": k1,
+        "smia_tv_percent_opencv": float(tv * 100.0),
+        "absolute_smia_tv_percent_opencv": float(abs(tv) * 100.0),
+        "distortion_type_opencv": _distortion_kind_from_k1(k1),
+        "straightness_error_before": float(before_error),
+        "straightness_error_after": float(after_error),
+        "max_line_bow_px": max_bow,
+        "rms_line_bow_px": rms_bow,
+        "max_line_bow_percent": float(max_bow / max(1, min(width, height)) * 100.0),
+        "rms_line_bow_percent": float(rms_bow / max(1, min(width, height)) * 100.0),
+    }
+
+
+def _compact_distortion_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key not in {"vertical_lines", "horizontal_lines"}
+    }
+
+
+def auto_detect_distortion_grid(
+    image: np.ndarray,
+) -> tuple[list[tuple[int, int, int, int]], dict[str, Any]]:
+    metadata = analyze_distortion_grid(image)
+    height, width = _gray_u8(image).shape
+    x_peaks = metadata["x_peaks"]
+    y_peaks = metadata["y_peaks"]
+    x_gap = float(np.median(np.diff(x_peaks))) if len(x_peaks) > 1 else width / 18.0
+    y_gap = float(np.median(np.diff(y_peaks))) if len(y_peaks) > 1 else height / 12.0
+    left_edge, right_edge = float(min(x_peaks)), float(max(x_peaks))
+    top_edge, bottom_edge = float(min(y_peaks)), float(max(y_peaks))
+    margin_x = int(round(x_gap * 0.45))
+    margin_y = int(round(y_gap * 0.45))
+    left = max(0, int(round(left_edge - margin_x)))
+    right = min(width, int(round(right_edge + margin_x)))
+    top = max(0, int(round(top_edge - margin_y)))
+    bottom = min(height, int(round(bottom_edge + margin_y)))
+    if right - left < width * 0.25 or bottom - top < height * 0.25:
+        raise WorkflowError("畸变网格 ROI 过小，请手动框选完整网格区域。")
+    metadata = {
+        **metadata,
+        "roi": [int(left), int(top), int(right - left), int(bottom - top)],
+        "roi_note": "绿色框为自动识别的畸变网格区域；青色/紫色线为追踪到的横纵网格线。",
+    }
+    return [(int(left), int(top), int(right - left), int(bottom - top))], metadata
+
+
+def save_distortion_annotation(
+    image: np.ndarray,
+    coordinates: list[tuple[int, int, int, int]],
+    metadata: dict[str, Any],
+    destination: Path,
+) -> None:
+    import cv2
+
+    if image.ndim == 2:
+        canvas = cv2.cvtColor(_gray_u8(image), cv2.COLOR_GRAY2BGR)
+    else:
+        canvas = cv2.cvtColor(image[:, :, :3], cv2.COLOR_RGB2BGR)
+    for x, y, width, height in coordinates:
+        cv2.rectangle(canvas, (x, y), (x + width, y + height), (0, 255, 0), 4)
+    for line in metadata.get("vertical_lines", []):
+        points = np.asarray(line, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(canvas, [points], False, (255, 255, 0), 2, cv2.LINE_AA)
+    for line in metadata.get("horizontal_lines", []):
+        points = np.asarray(line, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(canvas, [points], False, (255, 0, 255), 2, cv2.LINE_AA)
+    center = (canvas.shape[1] // 2, canvas.shape[0] // 2)
+    cv2.drawMarker(canvas, center, (0, 0, 255), cv2.MARKER_CROSS, 42, 3, cv2.LINE_AA)
+    text_lines = [
+        f"Grid: V{metadata.get('vertical_line_count', 0)} / H{metadata.get('horizontal_line_count', 0)}",
+        "green ROI, cyan/magenta grid lines",
+        "final k1 / TV values are in result table",
+    ]
+    for index, text in enumerate(text_lines):
+        cv2.putText(
+            canvas,
+            text,
+            (28, 44 + index * 38),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (0, 255, 0),
+            3,
+            cv2.LINE_AA,
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    suffix = destination.suffix.lower() or ".jpg"
+    extension = suffix if suffix in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"} else ".jpg"
+    ok, encoded = cv2.imencode(extension, canvas)
+    if not ok:
+        raise WorkflowError(f"无法保存畸变网格标注图：{destination}")
+    destination.write_bytes(encoded.tobytes())
+
+
 def save_annotated_rois(
     image: np.ndarray,
     coordinates: list[tuple[int, int, int, int]],
@@ -3074,14 +3443,53 @@ def run_distortion(
     _prepare_library(library_root)
     from py_imaging_quality.distortion.distortion import _distortion_from_roi
 
-    k1, tv = _distortion_from_roi(rois[0])
-    k1, tv_percent = float(k1), float(tv) * 100.0
-    kind = "桶形畸变" if k1 < 0 else "枕形畸变" if k1 > 0 else "未检出明显畸变"
+    grid_metrics: dict[str, Any] | None = None
+    grid_error: str | None = None
+    try:
+        grid_metrics = analyze_distortion_grid(rois[0])
+    except Exception as exc:
+        grid_error = str(exc)
+
+    legacy_k1: float | None = None
+    legacy_tv_percent: float | None = None
+    try:
+        raw_k1, raw_tv = _distortion_from_roi(rois[0])
+        legacy_k1 = float(raw_k1)
+        legacy_tv_percent = float(raw_tv) * 100.0
+    except Exception:
+        legacy_k1 = None
+        legacy_tv_percent = None
+
+    if grid_metrics is not None:
+        k1 = float(grid_metrics["k1_opencv"])
+        tv_percent = float(grid_metrics["smia_tv_percent_opencv"])
+        kind = str(grid_metrics["distortion_type_opencv"])
+    elif legacy_k1 is not None and legacy_tv_percent is not None:
+        k1 = legacy_k1
+        tv_percent = legacy_tv_percent
+        kind = _distortion_kind_from_k1(k1)
+    else:
+        raise WorkflowError(
+            "畸变测量失败：自动网格线检测与原始畸变算法都未能得到可靠结果。"
+        )
+    compact_grid = (
+        _compact_distortion_metadata(grid_metrics)
+        if grid_metrics is not None
+        else None
+    )
     return {
         "k1": k1,
         "smia_tv_percent": tv_percent,
+        "absolute_smia_tv_percent": abs(tv_percent),
         "distortion_type": kind,
-        "assessment": f"{kind}；SMIA TV 畸变率为 {tv_percent:.3f}%。",
+        "opencv_grid_measurement": compact_grid,
+        "opencv_grid_error": grid_error,
+        "legacy_k1_reference": legacy_k1,
+        "legacy_smia_tv_percent_reference": legacy_tv_percent,
+        "assessment": (
+            f"{kind}；OpenCV 网格线拟合 k1={k1:.6f}，"
+            f"SMIA TV 畸变率={tv_percent:.3f}%（绝对值 {abs(tv_percent):.3f}%）。"
+        ),
     }
 
 
@@ -3415,6 +3823,17 @@ def execute(
                     center_markers=True,
                     symmetry_axis_x=step_metadata.get("symmetry_axis_x"),
                     symmetric_pairs=step_metadata.get("symmetric_pairs"),
+                )
+                detection["annotated_image"] = str(annotated_path.resolve())
+        elif not roi_coordinates and tool == "distortion":
+            roi_coordinates, distortion_metadata = auto_detect_distortion_grid(image)
+            detection = _compact_distortion_metadata(distortion_metadata)
+            if annotated_path is not None:
+                save_distortion_annotation(
+                    image,
+                    roi_coordinates,
+                    distortion_metadata,
+                    annotated_path,
                 )
                 detection["annotated_image"] = str(annotated_path.resolve())
         elif not roi_coordinates and tool == "white_balance":

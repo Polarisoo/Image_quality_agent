@@ -21,6 +21,7 @@ from task3_agent import (
     DEFAULT_LIBRARY_ROOT,
     TOOLS,
     WorkflowError,
+    auto_detect_distortion_grid,
     auto_detect_colorchecker_rois,
     auto_detect_sfr_rectangle_edges,
     auto_detect_step_chart_rois,
@@ -28,6 +29,7 @@ from task3_agent import (
     load_image,
     plan_with_deepseek,
     save_annotated_rois,
+    save_distortion_annotation,
     summarize_with_deepseek,
     validate_deepseek_key,
 )
@@ -176,13 +178,18 @@ def _preview_detection(
             labels=[f"Gray {index}" for index in range(1, 7)],
         )
     elif tool == "distortion":
-        coordinates = [(0, 0, image.shape[1], image.shape[0])]
-        save_annotated_rois(
+        coordinates, metadata = auto_detect_distortion_grid(image)
+        save_distortion_annotation(
             image,
             coordinates,
+            metadata,
             annotated_path,
-            labels=["Distortion"],
         )
+        metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key not in {"vertical_lines", "horizontal_lines"}
+        }
     else:
         save_annotated_rois(image, [], annotated_path)
 
@@ -241,12 +248,25 @@ def _quality_messages(payload: dict[str, Any], algorithm_log: str) -> list[dict[
                     "text": "20 级灰阶的 19 个相邻过渡均被分辨。",
                 }
             )
+    elif tool == "distortion":
+        grid = payload["result"].get("opencv_grid_measurement") or {}
+        if grid:
+            messages.append(
+                {
+                    "level": "success",
+                    "text": (
+                        f"已追踪 {grid.get('vertical_line_count', 0)} 条竖直网格线、"
+                        f"{grid.get('horizontal_line_count', 0)} 条水平网格线；"
+                        f"最大线弯曲约 {grid.get('max_line_bow_percent', 0.0):.2f}%。"
+                    ),
+                }
+            )
     if not messages:
         messages.append({"level": "success", "text": "计算完成，未发现明显流程警告。"})
     return messages
 
 
-EDITABLE_ROI_TOOLS = {"sfr", "color_check", "step_chart"}
+EDITABLE_ROI_TOOLS = {"sfr", "color_check", "step_chart", "distortion"}
 
 
 def _tool_description(tool: str) -> str:
@@ -715,7 +735,7 @@ def run_evaluation():
         )
         if selected_task is None:
             raise WorkflowError("当前 Agent 计划中没有这个可修正的评价任务。")
-        expected_counts = {"color_check": 24, "step_chart": 20}
+        expected_counts = {"color_check": 24, "step_chart": 20, "distortion": 1}
         if selected_tool not in {"sfr", *expected_counts}:
             raise WorkflowError("当前工具暂不支持在图形页面人工修改 ROI。")
         expected_count = expected_counts.get(selected_tool)

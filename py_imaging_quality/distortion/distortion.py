@@ -150,31 +150,13 @@ def distortion(img=None):
     result = least_squares(obj, xGuess, method='lm')
     k1 = float(result.x[0])
 
-    # Calculate TV distortion using numpy roots (replaced sympy for compatibility)
-    # Equation 1: k1*x^3 + x = 0.5^0.5  ->  k1*x^3 + x - 0.5^0.5 = 0
-    coeffs1 = [float(k1), 0, 1, -(0.5 ** 0.5)]
-    r1_all = np.roots(coeffs1)
-    # Pick the real root closest to 0.5^0.5 (expected ~0.707)
-    y1 = None
-    best_diff = 1e9
-    for r in r1_all:
-        if abs(np.imag(r)) < 1e-6:
-            rv = float(np.real(r))
-            if abs(rv) < best_diff or (y1 is None and rv > 0):
-                best_diff = abs(rv)
-                y1 = rv * (0.5 ** 0.5)
-
-    # Equation 2: k1*x^3 + x = 1  ->  k1*x^3 + x - 1 = 0
-    coeffs2 = [float(k1), 0, 1, -1]
-    r2_all = np.roots(coeffs2)
-    y2 = None
-    best_diff = 1e9
-    for r in r2_all:
-        if abs(np.imag(r)) < 1e-6:
-            rv = float(np.real(r))
-            if abs(rv) < best_diff or (y2 is None and rv > 0):
-                best_diff = abs(rv)
-                y2 = rv
+    # MATLAB distortion.m uses:
+    #   k1*x^3 + x = 1        -> y1 = x * sqrt(0.5)
+    #   k1*x^3 + x = sqrt(.5) -> y2 = x
+    # The previous Python port had these two equations swapped.
+    y1 = _positive_real_root(k1, 1.0)
+    y1 = None if y1 is None else y1 * (0.5 ** 0.5)
+    y2 = _positive_real_root(k1, 0.5 ** 0.5)
 
     if y1 is not None and y2 is not None and abs(y2) > 1e-9:
         TV = (y1 - y2) / y2
@@ -287,26 +269,10 @@ def _distortion_from_roi(roi_img):
     result = least_squares(obj, [0.1], method='lm')
     k1 = float(result.x[0])
 
-    # TV calculation using numpy roots (replaced sympy for compatibility)
-    # Eq1: k1*x^3 + x = 0.5^0.5
-    coeffs1 = [float(k1), 0, 1, -(0.5 ** 0.5)]
-    r1_all = np.roots(coeffs1)
-    y1 = None
-    for r in r1_all:
-        if abs(np.imag(r)) < 1e-6:
-            rv = float(np.real(r))
-            if y1 is None or (rv > 0 and abs(rv) < abs(y1)):
-                y1 = rv * (0.5 ** 0.5)
-
-    # Eq2: k1*x^3 + x = 1
-    coeffs2 = [float(k1), 0, 1, -1]
-    r2_all = np.roots(coeffs2)
-    y2 = None
-    for r in r2_all:
-        if abs(np.imag(r)) < 1e-6:
-            rv = float(np.real(r))
-            if y2 is None or (rv > 0 and abs(rv) < abs(y2)):
-                y2 = rv
+    # TV calculation, kept consistent with MATLAB distortion.m.
+    y1 = _positive_real_root(k1, 1.0)
+    y1 = None if y1 is None else y1 * (0.5 ** 0.5)
+    y2 = _positive_real_root(k1, 0.5 ** 0.5)
 
     if y1 is not None and y2 is not None and abs(y2) > 1e-9:
         TV = (y1 - y2) / y2
@@ -323,3 +289,18 @@ def _residual(k1, ver_x, ver_y, hor_x, hor_y, xm, ym):
     k1_val = float(k1[0]) if hasattr(k1, '__len__') else float(k1)
     e = e_all(k1_val, ver_x, ver_y, hor_x, hor_y, xm, ym)
     return np.array([e])
+
+
+def _positive_real_root(k1, rhs):
+    """Return the positive real root of k1*x^3 + x = rhs."""
+    if abs(float(k1)) < 1e-12:
+        return float(rhs)
+    roots = np.roots([float(k1), 0.0, 1.0, -float(rhs)])
+    candidates = [
+        float(np.real(root))
+        for root in roots
+        if abs(np.imag(root)) < 1e-6 and float(np.real(root)) > 0
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda value: abs(float(k1) * value ** 3 + value - rhs))
