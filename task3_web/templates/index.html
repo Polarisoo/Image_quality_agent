@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>语言驱动像质评价 Agent</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <div id="keyGate" class="key-gate">
+    <div class="key-card">
+      <p class="eyebrow">DEEPSEEK AGENT ACCESS</p>
+      <h2>开始前，请先连接 Agent 模型</h2>
+      <p>本页面不再使用关键词判断意图。DeepSeek 负责理解自然语言、识别多个目标并生成 Workflow；OpenCV 和光学算法负责真实测量。</p>
+      <label for="gateApiKey">DeepSeek API Key</label>
+      <input id="gateApiKey" type="password" autocomplete="off" placeholder="sk-...">
+      <button id="validateKeyButton" class="primary">验证 API Key 并进入</button>
+      <div id="keyStatus" class="key-status">Key 仅保存在当前浏览器页面内，不写入代码和结果文件。</div>
+    </div>
+  </div>
+
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">TASK 3 · LANGUAGE-DRIVEN IMAGE QUALITY AGENT</p>
+      <h1>语言驱动像质评价 Agent</h1>
+      <p class="subtitle">上传一张图，用一句话提出要求。Agent 自主识别意图、规划工具、自动定位、计算并总结。</p>
+    </div>
+    <div id="serverStatus" class="status-pill">等待 API 连接</div>
+  </header>
+
+  <main class="workspace agent-workspace">
+    <aside class="control-panel panel">
+      <section>
+        <label class="step-label" for="imageInput">01 · 把待评价图交给 Agent</label>
+        <label class="file-drop" for="imageInput">
+          <strong id="fileName">点击选择 JPG / PNG / BMP / TIF</strong>
+          <span>图片仅在本机处理</span>
+        </label>
+        <input id="imageInput" type="file" accept=".jpg,.jpeg,.png,.bmp,.tif,.tiff">
+      </section>
+
+      <section>
+        <label class="step-label" for="message">02 · 直接对 Agent 说</label>
+        <textarea id="message" rows="5" placeholder="例如：请自动找到这张图中的斜正方形，计算水平和竖直方向的MTF，并总结清晰度。"></textarea>
+        <div class="example-label">自然语言示例，不是功能选择：</div>
+        <div class="prompt-examples">
+          <button class="prompt-example" data-message="请自动找到这张图中的斜正方形，计算水平和竖直方向的MTF，并总结清晰度。">“帮我测一下 MTF”</button>
+          <button class="prompt-example" data-message="请识别这张ColorChecker的24个色块，评价色彩还原度并总结。">“评价色彩还原度”</button>
+          <button class="prompt-example" data-message="请自动定位中央环形20级灰阶，测试能分辨多少级并总结阶调表现。">“看看灰阶表现”</button>
+        </div>
+      </section>
+
+      <div class="actions">
+        <button id="agentButton" class="primary agent-start" disabled>让 Agent 开始评价</button>
+      </div>
+
+      <div id="progressBox" class="progress-box hidden">
+        <span class="spinner"></span>
+        <span id="progressText">Agent 正在理解请求...</span>
+      </div>
+
+      <div class="tip">
+        <strong>这里为什么是 Agent</strong>
+        <p>你只提供“图片 + 自然语言目标”。工具类型、ROI 数量、OpenCV 定位方法和评价算法均由 Agent 决定。</p>
+      </div>
+    </aside>
+
+    <section class="workflow-panel panel">
+      <div class="workflow-head">
+        <div>
+          <span class="step-label">Agent Workflow</span>
+          <h2 id="workflowTitle">等待任务</h2>
+        </div>
+        <span id="intentBadge" class="intent-badge hidden"></span>
+      </div>
+      <div id="workflowTimeline" class="workflow-timeline">
+        <div class="workflow-empty">运行后会在这里显示真实的意图识别、规划和工具调用记录。</div>
+      </div>
+    </section>
+
+    <section class="viewer-panel panel">
+      <div class="viewer-head">
+        <div>
+          <span class="step-label">Agent 的 OpenCV 输出</span>
+          <h2 id="viewerTitle">等待 Agent 处理图片</h2>
+        </div>
+        <div class="viewer-tools">
+          <button id="manualGuideButton" class="ghost" disabled>人工框选说明</button>
+          <button id="manualButton" class="ghost" disabled>人工修正 ROI</button>
+          <button id="deleteManualButton" class="ghost" disabled>删除选中框</button>
+          <button id="clearManualButton" class="ghost" disabled>清空全部框</button>
+          <button id="rerunButton" class="ghost emphasis" disabled>用修正框重新计算</button>
+        </div>
+      </div>
+
+      <div id="imageStage" class="image-stage empty">
+        <div id="emptyState" class="empty-state">
+          <div class="target-icon"></div>
+          <p>Agent 调用 OpenCV 后，自动框选图会显示在这里</p>
+        </div>
+        <div id="imageWrap" class="image-wrap hidden">
+          <img id="previewImage" alt="Agent OpenCV输出">
+          <canvas id="roiCanvas"></canvas>
+        </div>
+      </div>
+
+      <div id="manualHint" class="manual-hint hidden">
+        点击橙色框可选中并拖动；删除后在空白处拖框会补回原编号，也可以继续添加新框。
+        <strong id="manualCount"></strong>
+      </div>
+      <div id="previewInfo" class="preview-info hidden"></div>
+      <div id="opencvTabs" class="output-tabs hidden"></div>
+    </section>
+
+    <section class="result-panel panel">
+      <div class="result-head">
+        <div>
+          <span class="step-label">Agent 整理与回答</span>
+          <h2 id="resultTitle">尚未评价</h2>
+        </div>
+        <a id="downloadResult" class="download hidden" href="#" download>下载完整 JSON</a>
+      </div>
+
+      <div id="agentAnswer" class="agent-answer hidden"></div>
+      <div id="qualityMessages"></div>
+      <div id="chartGallery" class="chart-gallery hidden"></div>
+      <div id="resultContent" class="result-placeholder">
+        Agent 会在这里输出自然语言总结和光学指标。
+      </div>
+
+      <details id="traceBox" class="trace-box hidden">
+        <summary>查看完整工具调用参数与算法日志</summary>
+        <pre id="traceContent"></pre>
+      </details>
+    </section>
+  </main>
+
+  <div id="manualGuideModal" class="guide-modal hidden" aria-hidden="true">
+    <div class="guide-card" role="dialog" aria-modal="true" aria-labelledby="manualGuideTitle">
+      <div class="guide-head">
+        <div>
+          <span class="step-label">人工 ROI 操作说明</span>
+          <h2 id="manualGuideTitle">如何正确框选</h2>
+        </div>
+        <button id="closeManualGuideButton" class="guide-close" aria-label="关闭说明">×</button>
+      </div>
+      <div id="manualGuideContent" class="guide-content"></div>
+      <div class="guide-actions">
+        <button id="startManualFromGuideButton" class="primary">我明白了，关闭说明</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.env
+图形界面结果/
+smoke_outputs/
+*.zip

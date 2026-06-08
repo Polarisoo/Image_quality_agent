@@ -1,0 +1,10 @@
+flask>=3.0
+werkzeug>=3.0
+requests>=2.31
+numpy>=1.24
+pillow>=10.0
+opencv-python>=4.8
+scipy>=1.10
+matplotlib>=3.7
+scikit-image>=0.21
+sympy>=1.12
